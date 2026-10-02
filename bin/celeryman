@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# celeryman [claude args...]
+#
+# Creates a celeryman tmux session for the current directory (Claude Code left,
+# GIF pane right), or attaches to it if one already exists.
+
+set -euo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+CELERYMAN_ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
+. "$CELERYMAN_ROOT/config.sh"
+
+for dep in tmux "${CELERYMAN_CLAUDE_CMD%% *}"; do
+  command -v "$dep" >/dev/null || { echo "celeryman: '$dep' not found on PATH" >&2; exit 1; }
+done
+
+# One session per directory, so Claude always starts where you launched it.
+# tmux session names can't contain "." or ":".
+dir_name="${PWD##*/}"
+dir_name="$(printf '%s' "${dir_name:-root}" | tr -c 'A-Za-z0-9_-' '_')"
+session="$CELERYMAN_SESSION-$dir_name"
+
+# A different directory with the same name gets its own session too.
+existing_dir="$(tmux show-options -v -t "=$session:" @celeryman_dir 2>/dev/null || true)"
+if [ -n "$existing_dir" ] && [ "$existing_dir" != "$PWD" ]; then
+  session="$session-$(printf '%s' "$PWD" | cksum | cut -c1-6)"
+fi
+
+attach() {
+  if [ -n "${TMUX:-}" ]; then
+    exec tmux switch-client -t "=$session"
+  else
+    exec tmux attach-session -t "=$session"
+  fi
+}
+
+if tmux has-session -t "=$session" 2>/dev/null; then
+  attach
+fi
+
+# Claude runs in the left pane; when it exits, the whole session goes with it
+# (which also kills chafa in the GIF pane).
+claude_cmd="$CELERYMAN_CLAUDE_CMD"
+for arg in "$@"; do claude_cmd+=" $(printf '%q' "$arg")"; done
+claude_cmd+='; tmux kill-session -t "$TMUX_PANE"'
+
+cols="$(tput cols 2>/dev/null || echo 200)"
+lines="$(tput lines 2>/dev/null || echo 50)"
+
+claude_pane="$(tmux new-session -d -P -F '#{pane_id}' -s "$session" \
+  -c "$PWD" -x "$cols" -y "$lines" "$claude_cmd")"
+gif_pane="$(tmux split-window -h -d -P -F '#{pane_id}' -t "$claude_pane" \
+  -l "${CELERYMAN_PANE_WIDTH}%" -c "$PWD" "tail -f /dev/null")"
+
+tmux set-option -t "=$session:" @celeryman_gif_pane "$gif_pane"
+tmux set-option -t "=$session:" @celeryman_dir "$PWD"
+# Keep the GIF pane around if chafa ever exits, so it can be respawned.
+tmux set-option -p -t "$gif_pane" remain-on-exit on
+# Let chafa's kitty/iTerm/sixel output through tmux.
+tmux set-option -w -t "$claude_pane" allow-passthrough on 2>/dev/null || true
+
+TMUX_PANE="$claude_pane" "$CELERYMAN_ROOT/bin/celery-pane" idle
+tmux select-pane -t "$claude_pane"
+
+attach

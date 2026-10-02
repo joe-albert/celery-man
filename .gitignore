@@ -1,0 +1,5 @@
+gifs/*
+!gifs/.gitkeep
+
+# IDE settings
+.idea/

@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# celery-pane idle|crunching|waiting|prompt
+#
+# Switches the animation in celeryman's GIF pane. Called from Claude Code hooks,
+# so it must be fast, silent, and always exit 0. It does nothing unless it is
+# running inside a celeryman tmux session.
+#
+# "prompt" is for the UserPromptSubmit hook: it reads the hook's JSON from
+# stdin, works out which command the prompt is (a slash command or a glossary
+# phrase), remembers it, and then shows crunching. While that command runs,
+# crunching plays gifs/<command>.gif if it exists, else gifs/hatwobble.gif.
+
+exec >/dev/null 2>&1
+
+state="$1"
+case "$state" in
+  idle|crunching|waiting|prompt) ;;
+  *) exit 0 ;;
+esac
+
+# Resolve the repo root through any symlinks (bash 3.2 friendly).
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+CELERYMAN_ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
+. "$CELERYMAN_ROOT/config.sh"
+
+# Only act when the caller (Claude Code) is running in a celeryman pane.
+[ -n "$TMUX_PANE" ] || exit 0
+command -v tmux >/dev/null || exit 0
+# Only celeryman sessions have @celeryman_gif_pane set.
+pane="$(tmux show-options -v -t "$TMUX_PANE" @celeryman_gif_pane)"
+[ -n "$pane" ] || exit 0
+
+# Prints the command a prompt (hook JSON on stdin) refers to, or nothing.
+prompt_command() {
+  local prompt name
+  prompt="$(jq -r '.prompt // empty')" || return 0
+
+  # A slash command, e.g. "/hatwobble" or "/review 123". Any slash command
+  # works, not just celeryman's, so long as gifs/<name>.gif exists.
+  case "$prompt" in
+    /*)
+      name="${prompt#/}"
+      name="${name%%[[:space:]]*}"
+      printf '%s' "$name" | tr -c 'A-Za-z0-9_-' '_'
+      return 0
+      ;;
+  esac
+
+  # A glossary phrase. Compare with case, spaces and punctuation stripped, and
+  # also accept the bare command name ("hat wobble pls" -> hatwobble). The
+  # longest match wins, so "nude tayne" is nudetayne, not tayne.
+  printf '%s' "$prompt" | awk -v glossary="$CELERYMAN_ROOT/claude/glossary.md" '
+    function norm(s) { s = tolower(s); gsub(/[^a-z0-9]/, "", s); return s }
+    { p = p $0 }
+    END {
+      p = norm(p)
+      # Rows look like: | Phrase | `/command` | Real prompt |
+      while ((getline line < glossary) > 0) {
+        if (split(line, f, "|") < 4 || f[3] !~ /`\//) continue
+        name = f[3]; gsub(/[` \/]/, "", name)
+        for (i = 1; i <= 2; i++) {
+          key = (i == 1) ? norm(f[2]) : norm(name)
+          if (key != "" && index(p, key) && length(key) > best) { best = length(key); hit = name }
+        }
+      }
+      if (hit != "") print hit
+    }'
+}
+
+if [ "$state" = prompt ]; then
+  state=crunching
+  cmd="$(prompt_command)"
+  tmux set-option -p -t "$pane" @celeryman_cmd "$cmd"
+else
+  cmd="$(tmux show-options -pqv -t "$pane" @celeryman_cmd)"
+fi
+
+gif="$CELERYMAN_GIF_DIR/$state.gif"
+if [ "$state" = crunching ] && [ -n "$cmd" ] && [ -f "$CELERYMAN_GIF_DIR/$cmd.gif" ]; then
+  gif="$CELERYMAN_GIF_DIR/$cmd.gif"
+fi
+
+# Skip the respawn if the pane is already showing this GIF, so frequent
+# events (PostToolUse) don't restart the animation.
+info="$(tmux display-message -p -t "$pane" '#{@celeryman_gif}|#{pane_dead}')" || exit 0
+[ "$info" = "$gif|0" ] && exit 0
+
+if [ -f "$gif" ] && command -v chafa >/dev/null; then
+  q() { printf '%q' "$1"; }
+  cmd="clear; exec chafa --format=$(q "$CELERYMAN_CHAFA_FORMAT") --animate=on --duration=inf $CELERYMAN_CHAFA_FLAGS $(q "$gif")"
+else
+  # No GIF (or no chafa): show the state name so the pane still says something.
+  cmd="clear; printf '\n\n   %s\n' $(printf '%q' "$state"); exec tail -f /dev/null"
+fi
+
+# respawn-pane -k kills the previous chafa before starting the new one.
+tmux respawn-pane -k -t "$pane" "$cmd"
+tmux set-option -p -t "$pane" @celeryman_state "$state"
+tmux set-option -p -t "$pane" @celeryman_gif "$gif"
+exit 0
