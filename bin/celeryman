@@ -15,7 +15,7 @@ done
 CELERYMAN_ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
 . "$CELERYMAN_ROOT/config.sh"
 
-for dep in tmux "${CELERYMAN_CLAUDE_CMD%% *}"; do
+for dep in tmux jq "${CELERYMAN_CLAUDE_CMD%% *}"; do
   command -v "$dep" >/dev/null || { echo "celeryman: '$dep' not found on PATH" >&2; exit 1; }
 done
 
@@ -43,9 +43,18 @@ if tmux has-session -t "=$session" 2>/dev/null; then
   attach
 fi
 
+greeting="Good morning $(celeryman_name), what will your first sequence of the day be?"
+
+# Claude Code shows the greeting from a SessionStart hook. Text printed before
+# Claude starts would be wiped when the pane resizes on attach. The hook is
+# passed with --settings, so it only applies to celeryman sessions.
+hook_cmd='jq -n --arg m "$CELERYMAN_GREETING" '\''{systemMessage: $m}'\'
+greeting_settings="$(jq -cn --arg cmd "$hook_cmd" \
+  '{hooks: {SessionStart: [{matcher: "startup|resume", hooks: [{type: "command", command: $cmd}]}]}}')"
+
 # Claude runs in the left pane; when it exits, the whole session goes with it
 # (which also kills chafa in the GIF pane).
-claude_cmd="$CELERYMAN_CLAUDE_CMD"
+claude_cmd="CELERYMAN_GREETING=$(printf '%q' "$greeting") $CELERYMAN_CLAUDE_CMD --settings $(printf '%q' "$greeting_settings")"
 for arg in "$@"; do claude_cmd+=" $(printf '%q' "$arg")"; done
 claude_cmd+='; tmux kill-session -t "$TMUX_PANE"'
 
@@ -54,8 +63,10 @@ lines="$(tput lines 2>/dev/null || echo 50)"
 
 claude_pane="$(tmux new-session -d -P -F '#{pane_id}' -s "$session" \
   -c "$PWD" -x "$cols" -y "$lines" "$claude_cmd")"
-gif_pane="$(tmux split-window -h -d -P -F '#{pane_id}' -t "$claude_pane" \
-  -l "${CELERYMAN_PANE_WIDTH}%" -c "$PWD" "tail -f /dev/null")"
+# The GIF pane starts hidden in a background window. "Computer, load up
+# Celery Man" (or "Show my working environment") brings it out.
+gif_pane="$(tmux new-window -d -P -F '#{pane_id}' -t "=$session:" \
+  -n celeryman-hidden -c "$PWD" "tail -f /dev/null")"
 
 tmux set-option -t "=$session:" @celeryman_gif_pane "$gif_pane"
 tmux set-option -t "=$session:" @celeryman_dir "$PWD"
@@ -64,7 +75,6 @@ tmux set-option -p -t "$gif_pane" remain-on-exit on
 # Let chafa's kitty/iTerm/sixel output through tmux.
 tmux set-option -w -t "$claude_pane" allow-passthrough on 2>/dev/null || true
 
-TMUX_PANE="$claude_pane" "$CELERYMAN_ROOT/bin/celery-pane" idle
-tmux select-pane -t "$claude_pane"
+tmux select-window -t "$claude_pane"
 
 attach

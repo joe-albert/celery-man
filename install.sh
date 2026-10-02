@@ -120,7 +120,7 @@ case ":$PATH:" in
 esac
 cat <<EOF
 
-Done. Put idle.gif, crunching.gif and waiting.gif in $ROOT/gifs, then run: celeryman
+Done. Put celeryman.gif, crunching.gif and waiting.gif in $ROOT/gifs, then run: celeryman
 For the "Computer, load up Celery Man" command, add this to your ~/.zshrc or ~/.bashrc:
   source $(printf '%q' "$ROOT/shell/celeryman-alias.sh")
 EOF

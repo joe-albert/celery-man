@@ -8,9 +8,14 @@
 # "prompt" is for the UserPromptSubmit hook: it reads the hook's JSON from
 # stdin, works out which command the prompt is (a slash command or a glossary
 # phrase), remembers it, and then shows crunching. While that command runs,
-# crunching plays gifs/<command>.gif if it exists, else gifs/hatwobble.gif.
+# crunching plays gifs/<command>.gif if it exists, else gifs/crunching.gif.
+#
+# "prompt" also handles "Computer, load up Celery Man" and "Show my working
+# environment" (show the GIF pane) and "Hide my working environment": it shows
+# or hides the pane and blocks the prompt, so it never reaches Claude.
 
-exec >/dev/null 2>&1
+# Keep stdout on fd 3 for the hook's JSON reply; everything else is silent.
+exec 3>&1 >/dev/null 2>&1
 
 state="$1"
 case "$state" in
@@ -35,10 +40,9 @@ command -v tmux >/dev/null || exit 0
 pane="$(tmux show-options -v -t "$TMUX_PANE" @celeryman_gif_pane)"
 [ -n "$pane" ] || exit 0
 
-# Prints the command a prompt (hook JSON on stdin) refers to, or nothing.
+# Prints the command $prompt refers to, or nothing.
 prompt_command() {
-  local prompt name
-  prompt="$(jq -r '.prompt // empty')" || return 0
+  local name
 
   # A slash command, e.g. "/hatwobble" or "/review 123". Any slash command
   # works, not just celeryman's, so long as gifs/<name>.gif exists.
@@ -72,34 +76,130 @@ prompt_command() {
     }'
 }
 
+# Prints "load", "show" or "hide" if $prompt is the whole phrase "Computer,
+# load up Celery Man" or "Show/Hide my working environment" (case, spaces,
+# punctuation and a leading "computer" ignored).
+toggle_phrase() {
+  printf '%s' "$prompt" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z' | sed -nE '
+    s/^(computer)?(please)?loadupceleryman(please)?$/load/p
+    s/^(computer)?(please)?(show|hide)(me)?(my|the)?workingenvironment(please)?$/\3/p'
+}
+
+# Stops Claude Code from sending the prompt to Claude, showing $1 instead.
+block_prompt() {
+  jq -cn --arg r "$1" '{decision: "block", reason: $r}' >&3
+}
+
+# Shows $1 to the user under their prompt; the prompt still goes to Claude.
+reply() {
+  jq -cn --arg m "$1" '{systemMessage: $m}' >&3
+}
+
+# The pane is hidden when it has been moved out of Claude's window.
+hidden() {
+  [ "$(tmux display-message -p -t "$pane" '#{window_id}')" != \
+    "$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}')" ]
+}
+
 if [ "$state" = prompt ]; then
-  state=crunching
-  cmd="$(prompt_command)"
-  tmux set-option -p -t "$pane" @celeryman_cmd "$cmd"
+  prompt="$(jq -r '.prompt // empty')"
+  toggle="$(toggle_phrase)"
+  case "$toggle" in
+    hide)
+      if hidden; then
+        block_prompt "Your working environment is already hidden."
+      else
+        # Park the pane in a background window, and stop chafa while it's there.
+        tmux break-pane -d -s "$pane" -n celeryman-hidden
+        tmux respawn-pane -k -t "$pane" "exec tail -f /dev/null"
+        tmux set-option -p -t "$pane" @celeryman_gif hidden
+        block_prompt "Hid your working environment."
+      fi
+      exit 0
+      ;;
+    show|load)
+      if hidden; then
+        tmux join-pane -h -d -l "${CELERYMAN_PANE_WIDTH}%" -s "$pane" -t "$TMUX_PANE"
+        if [ "$toggle" = load ]; then
+          block_prompt "Yes, $(celeryman_name)"
+        else
+          block_prompt "Showing your working environment."
+        fi
+      else
+        if [ "$toggle" = load ]; then
+          block_prompt "Yes, $(celeryman_name)"
+        else
+          block_prompt "Your working environment is already showing."
+        fi
+        exit 0
+      fi
+      # Fall through to draw whatever was showing before it was hidden.
+      state=idle
+      cmd="$(tmux show-options -pqv -t "$pane" @celeryman_cmd)"
+      ;;
+    *)
+      state=crunching
+      cmd="$(prompt_command)"
+      if [ -n "$cmd" ]; then
+        msg="$(celeryman_lookup "$CELERYMAN_COMMAND_REPLIES" "$cmd")"
+        [ -z "$msg" ] || reply "$msg"
+      fi
+      tmux set-option -p -t "$pane" @celeryman_cmd "$cmd"
+      tmux set-option -p -t "$pane" @celeryman_prompted 1
+      ;;
+  esac
 else
   cmd="$(tmux show-options -pqv -t "$pane" @celeryman_cmd)"
 fi
 
-gif="$CELERYMAN_GIF_DIR/$state.gif"
-if [ "$state" = crunching ] && [ -n "$cmd" ] && [ -f "$CELERYMAN_GIF_DIR/$cmd.gif" ]; then
-  gif="$CELERYMAN_GIF_DIR/$cmd.gif"
+# While hidden, remember the command (above) but don't draw anything.
+hidden && exit 0
+
+# Once a prompt has run, idle keeps showing that prompt's GIF instead of
+# going back to celeryman.gif.
+gif_state="$state"
+if [ "$state" = idle ] && [ -n "$(tmux show-options -pqv -t "$pane" @celeryman_prompted)" ]; then
+  gif_state=crunching
 fi
 
-# Skip the respawn if the pane is already showing this GIF, so frequent
-# events (PostToolUse) don't restart the animation.
-info="$(tmux display-message -p -t "$pane" '#{@celeryman_gif}|#{pane_dead}')" || exit 0
-[ "$info" = "$gif|0" ] && exit 0
+# Before any prompt, idle plays celeryman.gif, which is also the fallback for
+# any state without its own GIF.
+case "$gif_state" in
+  idle) gif="$CELERYMAN_GIF_DIR/celeryman.gif" ;;
+  *)    gif="$CELERYMAN_GIF_DIR/$gif_state.gif" ;;
+esac
+if [ "$gif_state" = crunching ] && [ -n "$cmd" ]; then
+  # The command's entry in CELERYMAN_COMMAND_GIFS, else <command>.gif.
+  mapped="$(celeryman_lookup "$CELERYMAN_COMMAND_GIFS" "$cmd")"
+  case "$mapped" in
+    "") ;;
+    /*) ;;
+    *) mapped="$CELERYMAN_GIF_DIR/$mapped" ;;
+  esac
+  for f in "$mapped" "$CELERYMAN_GIF_DIR/$cmd.gif"; do
+    if [ -n "$f" ] && [ -f "$f" ]; then gif="$f"; break; fi
+  done
+fi
+[ -f "$gif" ] || gif="$CELERYMAN_GIF_DIR/celeryman.gif"
 
-if [ -f "$gif" ] && command -v chafa >/dev/null; then
+# What the pane will show: the GIF, or the state name as text.
+if [ -f "$gif" ] && command -v chafa >/dev/null; then shown="$gif"; else shown="text:$state"; fi
+
+# Skip the respawn if the pane is already showing this, so frequent events
+# (PostToolUse) don't restart the animation.
+info="$(tmux display-message -p -t "$pane" '#{@celeryman_gif}|#{pane_dead}')" || exit 0
+[ "$info" = "$shown|0" ] && exit 0
+
+if [ "$shown" = "$gif" ]; then
   q() { printf '%q' "$1"; }
   cmd="clear; exec chafa --format=$(q "$CELERYMAN_CHAFA_FORMAT") --animate=on --duration=inf $CELERYMAN_CHAFA_FLAGS $(q "$gif")"
 else
-  # No GIF (or no chafa): show the state name so the pane still says something.
+  # No GIF, not even celeryman.gif (or no chafa): show the state name so the pane still says something.
   cmd="clear; printf '\n\n   %s\n' $(printf '%q' "$state"); exec tail -f /dev/null"
 fi
 
 # respawn-pane -k kills the previous chafa before starting the new one.
 tmux respawn-pane -k -t "$pane" "$cmd"
 tmux set-option -p -t "$pane" @celeryman_state "$state"
-tmux set-option -p -t "$pane" @celeryman_gif "$gif"
+tmux set-option -p -t "$pane" @celeryman_gif "$shown"
 exit 0

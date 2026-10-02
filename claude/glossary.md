@@ -10,3 +10,5 @@ The user may type Tim and Eric "Celery Man" phrases as shorthand for real reques
 | Nude Tayne | `/nudetayne` | Run the shell command `sleep 5`, then reply with only the word "done". Do nothing else. |
 | Engage 4d3d3d3 | `/4d3d3d3` | Run the shell command `sleep 5`, then reply with only the word "done". Do nothing else. |
 | Now Tayne I can get into | `/tayne` | Run the shell command `sleep 5`, then reply with only the word "done". Do nothing else. |
+
+"Computer, load up Celery Man" and "Show my working environment" show the GIF pane, and "Hide my working environment" hides it. Inside a celeryman session they're handled before they reach you. If you see one, the user isn't in a celeryman session: say in one line that it only works there (start it with `celeryman`) and do nothing else.
