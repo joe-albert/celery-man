@@ -1,5 +1,7 @@
 gifs/*
 !gifs/.gitkeep
+music/*
+!music/.gitkeep
 
 # IDE settings
 .idea/

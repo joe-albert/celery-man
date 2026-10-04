@@ -43,6 +43,9 @@ if command -v tmux >/dev/null; then
   fi
 fi
 [ "$missing" -eq 0 ] || exit 1
+if ! command -v mpg123 >/dev/null; then
+  echo "optional: mpg123 plays music alongside the GIFs   (install with: $(hint mpg123))"
+fi
 
 # --- scripts -----------------------------------------------------------------
 

@@ -35,6 +35,18 @@ CELERYMAN_CHAFA_FLAGS="${CELERYMAN_CHAFA_FLAGS:-}"
 # Empty means the first word of your git user.name, else your account name.
 CELERYMAN_NAME="${CELERYMAN_NAME:-}"
 
+# Music. With mpg123 installed, "Computer, load up Celery Man" starts a song
+# that loops until you quit. Hiding the pane pauses it; showing it resumes.
+# Set CELERYMAN_SOUND=off to mute.
+CELERYMAN_SOUND="${CELERYMAN_SOUND:-on}"
+# Directory holding the song.
+CELERYMAN_MUSIC_DIR="${CELERYMAN_MUSIC_DIR:-$CELERYMAN_ROOT/music}"
+# The song: a file in CELERYMAN_MUSIC_DIR (or an absolute path). Empty means
+# the first .mp3 there.
+CELERYMAN_SONG="${CELERYMAN_SONG:-}"
+# Volume, 0-100.
+CELERYMAN_VOLUME="${CELERYMAN_VOLUME:-50}"
+
 # Replies shown when a command starts, one "command = reply" per line.
 CELERYMAN_COMMAND_REPLIES="${CELERYMAN_COMMAND_REPLIES:-
 4d3d3d3 = 4d3d3d3 engaged.

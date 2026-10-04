@@ -13,6 +13,8 @@
 # "prompt" also handles "Computer, load up Celery Man" and "Show my working
 # environment" (show the GIF pane) and "Hide my working environment": it shows
 # or hides the pane and blocks the prompt, so it never reaches Claude.
+# "Load up Celery Man" also starts the song from music/; hiding the pane
+# pauses it and showing it again resumes it.
 
 # Keep stdout on fd 3 for the hook's JSON reply; everything else is silent.
 exec 3>&1 >/dev/null 2>&1
@@ -101,6 +103,53 @@ hidden() {
     "$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}')" ]
 }
 
+# The song runs in its own background window, separate from the GIF pane, so
+# GIF changes don't touch it. mpg123's terminal controls pause it: "s" toggles.
+# Prints the music pane's id if the song is running.
+music_pane() {
+  local mp
+  mp="$(tmux show-options -qv -t "$TMUX_PANE" @celeryman_music_pane)"
+  [ -n "$mp" ] && tmux display-message -p -t "$mp" '#{pane_id}' 2>/dev/null
+}
+
+# Starts the song, or resumes it if it's paused.
+music_play() {
+  local mp song
+  [ "$CELERYMAN_SOUND" != off ] && command -v mpg123 >/dev/null || return 0
+  if mp="$(music_pane)"; then
+    music_resume
+    return 0
+  fi
+  song="$CELERYMAN_SONG"
+  case "$song" in
+    "") song="$(ls "$CELERYMAN_MUSIC_DIR"/*.mp3 2>/dev/null | head -1)" ;;
+    /*) ;;
+    *) song="$CELERYMAN_MUSIC_DIR/$song" ;;
+  esac
+  [ -f "$song" ] || return 0
+  local volume="${CELERYMAN_VOLUME//[^0-9]/}"
+  mp="$(tmux new-window -d -P -F '#{pane_id}' -t "$(tmux display-message -p -t "$TMUX_PANE" '#{session_id}'):" \
+    -n celeryman-music "exec mpg123 -C -q --loop -1 -f $(( 32768 * ${volume:-50} / 100 )) $(printf '%q' "$song")")"
+  tmux set-option -t "$TMUX_PANE" @celeryman_music_pane "$mp"
+  tmux set-option -p -t "$mp" @celeryman_paused 0
+}
+
+music_pause() {
+  local mp
+  mp="$(music_pane)" || return 0
+  [ "$(tmux show-options -pqv -t "$mp" @celeryman_paused)" = 1 ] && return 0
+  tmux send-keys -t "$mp" s
+  tmux set-option -p -t "$mp" @celeryman_paused 1
+}
+
+music_resume() {
+  local mp
+  mp="$(music_pane)" || return 0
+  [ "$(tmux show-options -pqv -t "$mp" @celeryman_paused)" = 1 ] || return 0
+  tmux send-keys -t "$mp" s
+  tmux set-option -p -t "$mp" @celeryman_paused 0
+}
+
 if [ "$state" = prompt ]; then
   prompt="$(jq -r '.prompt // empty')"
   toggle="$(toggle_phrase)"
@@ -113,11 +162,14 @@ if [ "$state" = prompt ]; then
         tmux break-pane -d -s "$pane" -n celeryman-hidden
         tmux respawn-pane -k -t "$pane" "exec tail -f /dev/null"
         tmux set-option -p -t "$pane" @celeryman_gif hidden
+        music_pause
         block_prompt "Hid your working environment."
       fi
       exit 0
       ;;
     show|load)
+      # "Load up Celery Man" starts the song; either phrase resumes it.
+      if [ "$toggle" = load ]; then music_play; else music_resume; fi
       if hidden; then
         tmux join-pane -h -d -l "${CELERYMAN_PANE_WIDTH}%" -s "$pane" -t "$TMUX_PANE"
         if [ "$toggle" = load ]; then
